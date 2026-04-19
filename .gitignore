@@ -1,0 +1,37 @@
+# Firmware build artifacts
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig.old
+
+# sdkconfig contains WiFi credentials
+firmware/sdkconfig
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# Server models (large files)
+xiaozhi-esp32-server/main/xiaozhi-server/models/
+xiaozhi-esp32-server/main/xiaozhi-server/venv/
+xiaozhi-esp32-server/main/xiaozhi-server/data/
+xiaozhi-esp32-server/main/xiaozhi-server/plugins/
+
+# Node.js
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.key
+*.pem
