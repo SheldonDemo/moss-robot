@@ -3,16 +3,19 @@ from aiohttp import web
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
+from core.api.tool_proxy_handler import ToolProxyHandler
 
 TAG = __name__
 
 
 class SimpleHttpServer:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, connections: dict = None):
         self.config = config
         self.logger = setup_logging()
+        self.connections = connections or {}
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
+        self.tool_proxy_handler = ToolProxyHandler(config, self.connections)
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """获取websocket地址
@@ -72,6 +75,10 @@ class SimpleHttpServer:
                         web.options(
                             "/mcp/vision/explain", self.vision_handler.handle_options
                         ),
+                        # OpenClaw 工具代理
+                        web.get("/moss/tools/call", self.tool_proxy_handler.handle_get),
+                        web.post("/moss/tools/call", self.tool_proxy_handler.handle_post),
+                        web.options("/moss/tools/call", self.tool_proxy_handler.handle_options),
                     ]
                 )
 

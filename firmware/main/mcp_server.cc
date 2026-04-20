@@ -86,11 +86,12 @@ void McpServer::AddCommonTools() {
     auto camera = board.GetCamera();
     if (camera) {
         AddTool("self.camera.take_photo",
-            "Take a photo and explain it. Use this tool after the user asks you to see something.\n"
+            "Take a photo and explain it. The camera automatically warms up and checks image quality before analysis.\n"
+            "Use this tool after the user asks you to see something.\n"
             "Args:\n"
             "  `question`: The question that you want to ask about the photo.\n"
             "Return:\n"
-            "  A JSON object that provides the photo information.",
+            "  A JSON object that provides the photo information and quality metrics.",
             PropertyList({
                 Property("question", kPropertyTypeString)
             }),

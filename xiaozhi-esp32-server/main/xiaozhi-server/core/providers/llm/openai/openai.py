@@ -96,9 +96,9 @@ class LLMProvider(LLMProviderBase):
         for chunk in responses:
             try:
                 delta = chunk.choices[0].delta if getattr(chunk, "choices", None) else None
-                content = getattr(delta, "content", "") if delta else ""
+                content = getattr(delta, "content", None) if delta else None
             except IndexError:
-                content = ""
+                content = None
             if content:
                 if "<think>" in content:
                     is_active = False

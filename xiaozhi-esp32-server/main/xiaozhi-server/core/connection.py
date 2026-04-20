@@ -926,11 +926,14 @@ class ConnectionHandler:
 
         # Define intent functions
         functions = None
+        # OpenClaw mode: skip tool definitions, let OpenClaw handle tools via skills
+        use_openclaw = self.config.get("use_openclaw", False)
         # 达到最大深度时，禁用工具调用，强制 LLM 直接回答
         if (
                 self.intent_type == "function_call"
                 and hasattr(self, "func_handler")
                 and not force_final_answer
+                and not use_openclaw
         ):
             functions = self.func_handler.get_functions()
 

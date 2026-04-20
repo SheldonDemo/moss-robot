@@ -13,15 +13,15 @@
 
 Esp32Camera::Esp32Camera(const camera_config_t& config) {
     // camera init
-    esp_err_t err = esp_camera_init(&config); // 配置上面定义的参数
+    esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Camera init failed with error 0x%x", err);
         return;
     }
 
-    sensor_t *s = esp_camera_sensor_get(); // 获取摄像头型号
+    sensor_t *s = esp_camera_sensor_get();
     if (s->id.PID == GC0308_PID) {
-        s->set_hmirror(s, 0);  // 这里控制摄像头镜像 写1镜像 写0不镜像
+        s->set_hmirror(s, 0);
     }
 
     // 初始化预览图片的内存
@@ -84,61 +84,121 @@ void Esp32Camera::SetExplainUrl(const std::string& url, const std::string& token
     explain_token_ = token;
 }
 
-bool Esp32Camera::Capture() {
-    if (encoder_thread_.joinable()) {
-        encoder_thread_.join();
+void Esp32Camera::UpdatePreview() {
+    if (preview_image_.data_size == 0 || preview_image_.data == nullptr || fb_ == nullptr) {
+        return;
     }
-
-    int frames_to_get = 2;
-    // Try to get a stable frame
-    for (int i = 0; i < frames_to_get; i++) {
-        if (fb_ != nullptr) {
-            esp_camera_fb_return(fb_);
-        }
-        fb_ = esp_camera_fb_get();
-        if (fb_ == nullptr) {
-            ESP_LOGE(TAG, "Camera capture failed");
-            return false;
-        }
-    }
-
-    // 如果预览图片 buffer 为空，则跳过预览
-    // 但仍返回 true，因为此时图像可以上传至服务器
-    if (preview_image_.data_size == 0) {
-        ESP_LOGW(TAG, "Skip preview because of unsupported frame size");
-        return true;
-    }
-    if (preview_image_.data == nullptr) {
-        ESP_LOGE(TAG, "Preview image data is not initialized");
-        return true;
-    }
-    // 显示预览图片
     auto display = Board::GetInstance().GetDisplay();
     if (display != nullptr) {
         auto src = (uint16_t*)fb_->buf;
         auto dst = (uint16_t*)preview_image_.data;
         size_t pixel_count = fb_->len / 2;
         for (size_t i = 0; i < pixel_count; i++) {
-            // 交换每个16位字内的字节
             dst[i] = __builtin_bswap16(src[i]);
         }
         display->SetPreviewImage(&preview_image_);
     }
+}
+
+int Esp32Camera::CalculateMeanBrightness() {
+    if (fb_ == nullptr) return 0;
+    auto pixels = (uint16_t*)fb_->buf;
+    size_t count = fb_->len / 2;
+    // 每隔4个像素采样，提取绿色通道 (RGB565 bit[10:5])
+    int64_t sum = 0;
+    size_t sampled = 0;
+    for (size_t i = 0; i < count; i += 4) {
+        uint16_t green565 = (pixels[i] >> 5) & 0x3F;
+        sum += green565;
+        sampled++;
+    }
+    return (sampled > 0) ? (int)(sum / sampled) : 0;
+}
+
+int Esp32Camera::CalculateBrightnessVariance(int mean) {
+    if (fb_ == nullptr) return 0;
+    auto pixels = (uint16_t*)fb_->buf;
+    size_t count = fb_->len / 2;
+    int64_t sum_sq = 0;
+    size_t sampled = 0;
+    for (size_t i = 0; i < count; i += 4) {
+        uint16_t green565 = (pixels[i] >> 5) & 0x3F;
+        int diff = (int)green565 - mean;
+        sum_sq += diff * diff;
+        sampled++;
+    }
+    return (sampled > 0) ? (int)(sum_sq / sampled) : 0;
+}
+
+bool Esp32Camera::IsFrameAcceptable() {
+    last_brightness_ = CalculateMeanBrightness();
+    last_variance_ = CalculateBrightnessVariance(last_brightness_);
+    ESP_LOGI(TAG, "Quality check: brightness=%d, variance=%d", last_brightness_, last_variance_);
+    return last_brightness_ >= kMinBrightness &&
+           last_brightness_ <= kMaxBrightness &&
+           last_variance_ >= kMinVariance;
+}
+
+bool Esp32Camera::Capture() {
+    if (encoder_thread_.joinable()) {
+        encoder_thread_.join();
+    }
+
+    // Phase 1: 预热帧，让AE/AWB稳定
+    for (int i = 0; i < kMinWarmupFrames; i++) {
+        if (fb_ != nullptr) {
+            esp_camera_fb_return(fb_);
+        }
+        fb_ = esp_camera_fb_get();
+        if (fb_ == nullptr) {
+            ESP_LOGE(TAG, "Camera capture failed during warmup (frame %d)", i);
+            return false;
+        }
+        // 每帧更新预览，用户能看到机器人在"看"
+        UpdatePreview();
+    }
+
+    // Phase 2: 质量检测，不合格则重试
+    int retry_count = 0;
+    while (retry_count < kMaxQualityRetries) {
+        if (IsFrameAcceptable()) {
+            break;
+        }
+        ESP_LOGW(TAG, "Frame quality poor (brightness=%d, variance=%d), retry %d/%d",
+                 last_brightness_, last_variance_, retry_count + 1, kMaxQualityRetries);
+        // 多抓几帧让曝光继续稳定
+        for (int i = 0; i < kRetryExtraFrames; i++) {
+            if (fb_ != nullptr) {
+                esp_camera_fb_return(fb_);
+            }
+            fb_ = esp_camera_fb_get();
+            if (fb_ == nullptr) {
+                ESP_LOGE(TAG, "Camera capture failed during retry");
+                return false;
+            }
+            UpdatePreview();
+        }
+        retry_count++;
+    }
+
+    ESP_LOGI(TAG, "Capture complete: brightness=%d, variance=%d, retries=%d",
+             last_brightness_, last_variance_, retry_count);
     return true;
 }
+
 bool Esp32Camera::SetHMirror(bool enabled) {
     sensor_t *s = esp_camera_sensor_get();
     if (s == nullptr) {
         ESP_LOGE(TAG, "Failed to get camera sensor");
         return false;
     }
-    
+
     esp_err_t err = s->set_hmirror(s, enabled);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set horizontal mirror: %d", err);
         return false;
     }
-    
+
     ESP_LOGI(TAG, "Camera horizontal mirror set to: %s", enabled ? "enabled" : "disabled");
     return true;
 }
@@ -149,53 +209,38 @@ bool Esp32Camera::SetVFlip(bool enabled) {
         ESP_LOGE(TAG, "Failed to get camera sensor");
         return false;
     }
-    
+
     esp_err_t err = s->set_vflip(s, enabled);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set vertical flip: %d", err);
         return false;
     }
-    
+
     ESP_LOGI(TAG, "Camera vertical flip set to: %s", enabled ? "enabled" : "disabled");
     return true;
 }
 
-/**
- * @brief 将摄像头捕获的图像发送到远程服务器进行AI分析和解释
- * 
- * 该函数将当前摄像头缓冲区中的图像编码为JPEG格式，并通过HTTP POST请求
- * 以multipart/form-data的形式发送到指定的解释服务器。服务器将根据提供的
- * 问题对图像进行AI分析并返回结果。
- * 
- * 实现特点：
- * - 使用独立线程编码JPEG，与主线程分离
- * - 采用分块传输编码(chunked transfer encoding)优化内存使用
- * - 通过队列机制实现编码线程和发送线程的数据同步
- * - 支持设备ID、客户端ID和认证令牌的HTTP头部配置
- * 
- * @param question 要向AI提出的关于图像的问题，将作为表单字段发送
- * @return std::string 服务器返回的JSON格式响应字符串
- *         成功时包含AI分析结果，失败时包含错误信息
- *         格式示例：{"success": true, "result": "分析结果"}
- *                  {"success": false, "message": "错误信息"}
- * 
- * @note 调用此函数前必须先调用SetExplainUrl()设置服务器URL
- * @note 函数会等待之前的编码线程完成后再开始新的处理
- * @warning 如果摄像头缓冲区为空或网络连接失败，将返回错误信息
- */
 std::string Esp32Camera::Explain(const std::string& question) {
     if (explain_url_.empty()) {
         return "{\"success\": false, \"message\": \"Image explain URL or token is not set\"}";
     }
 
-    // 创建局部的 JPEG 队列, 40 entries is about to store 512 * 40 = 20480 bytes of JPEG data
+    // 在问题中加入图像质量上下文，让VLLM了解拍摄条件
+    std::string quality_context = "[图像质量: 亮度=" + std::to_string(last_brightness_) +
+        ", 对比度=" + std::to_string(last_variance_) + "]";
+    if (last_brightness_ < kMinBrightness + 20) {
+        quality_context += " 注意：图像可能偏暗，请根据可见内容尽量回答。";
+    }
+    std::string full_question = quality_context + " " + question;
+
+    // 创建局部的 JPEG 队列
     QueueHandle_t jpeg_queue = xQueueCreate(40, sizeof(JpegChunk));
     if (jpeg_queue == nullptr) {
         ESP_LOGE(TAG, "Failed to create JPEG queue");
         return "{\"success\": false, \"message\": \"Failed to create JPEG queue\"}";
     }
 
-    // We spawn a thread to encode the image to JPEG
+    // 使用独立线程编码JPEG
     encoder_thread_ = std::thread([this, jpeg_queue]() {
         frame2jpg_cb(fb_, 80, [](void* arg, size_t index, const void* data, size_t len) -> unsigned int {
             auto jpeg_queue = (QueueHandle_t)arg;
@@ -211,10 +256,8 @@ std::string Esp32Camera::Explain(const std::string& question) {
 
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(3);
-    // 构造multipart/form-data请求体
     std::string boundary = "----ESP32_CAMERA_BOUNDARY";
 
-    // 配置HTTP客户端，使用分块传输编码
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
     if (!explain_token_.empty()) {
@@ -224,7 +267,6 @@ std::string Esp32Camera::Explain(const std::string& question) {
     http->SetHeader("Transfer-Encoding", "chunked");
     if (!http->Open("POST", explain_url_)) {
         ESP_LOGE(TAG, "Failed to connect to explain URL");
-        // Clear the queue
         encoder_thread_.join();
         JpegChunk chunk;
         while (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) == pdPASS) {
@@ -237,18 +279,16 @@ std::string Esp32Camera::Explain(const std::string& question) {
         vQueueDelete(jpeg_queue);
         return "{\"success\": false, \"message\": \"Failed to connect to explain URL\"}";
     }
-    
+
     {
-        // 第一块：question字段
         std::string question_field;
         question_field += "--" + boundary + "\r\n";
         question_field += "Content-Disposition: form-data; name=\"question\"\r\n";
         question_field += "\r\n";
-        question_field += question + "\r\n";
+        question_field += full_question + "\r\n";
         http->Write(question_field.c_str(), question_field.size());
     }
     {
-        // 第二块：文件字段头部
         std::string file_header;
         file_header += "--" + boundary + "\r\n";
         file_header += "Content-Disposition: form-data; name=\"file\"; filename=\"camera.jpg\"\r\n";
@@ -257,7 +297,6 @@ std::string Esp32Camera::Explain(const std::string& question) {
         http->Write(file_header.c_str(), file_header.size());
     }
 
-    // 第三块：JPEG数据
     size_t total_sent = 0;
     while (true) {
         JpegChunk chunk;
@@ -266,24 +305,20 @@ std::string Esp32Camera::Explain(const std::string& question) {
             break;
         }
         if (chunk.data == nullptr) {
-            break; // The last chunk
+            break;
         }
         http->Write((const char*)chunk.data, chunk.len);
         total_sent += chunk.len;
         heap_caps_free(chunk.data);
     }
-    // Wait for the encoder thread to finish
     encoder_thread_.join();
-    // 清理队列
     vQueueDelete(jpeg_queue);
 
     {
-        // 第四块：multipart尾部
         std::string multipart_footer;
         multipart_footer += "\r\n--" + boundary + "--\r\n";
         http->Write(multipart_footer.c_str(), multipart_footer.size());
     }
-    // 结束块
     http->Write("", 0);
 
     if (http->GetStatusCode() != 200) {
@@ -294,9 +329,8 @@ std::string Esp32Camera::Explain(const std::string& question) {
     std::string result = http->ReadAll();
     http->Close();
 
-    // Get remain task stack size
     size_t remain_stack_size = uxTaskGetStackHighWaterMark(nullptr);
-    ESP_LOGI(TAG, "Explain image size=%dx%d, compressed size=%d, remain stack size=%d, question=%s\n%s",
-        fb_->width, fb_->height, total_sent, remain_stack_size, question.c_str(), result.c_str());
+    ESP_LOGI(TAG, "Explain image size=%dx%d, compressed size=%d, remain stack=%d, quality=[b=%d,v=%d]\n%s",
+        fb_->width, fb_->height, total_sent, remain_stack_size, last_brightness_, last_variance_, result.c_str());
     return result;
 }

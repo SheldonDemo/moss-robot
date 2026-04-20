@@ -71,8 +71,8 @@ async def main():
     # 启动 WebSocket 服务器
     ws_server = WebSocketServer(config)
     ws_task = asyncio.create_task(ws_server.start())
-    # 启动 Simple http 服务器
-    ota_server = SimpleHttpServer(config)
+    # 启动 Simple http 服务器 (共享连接注册表)
+    ota_server = SimpleHttpServer(config, connections=ws_server.connections)
     ota_task = asyncio.create_task(ota_server.start())
 
     read_config_from_api = config.get("read_config_from_api", False)
@@ -85,6 +85,11 @@ async def main():
         )
     logger.bind(tag=TAG).info(
         "视觉分析接口是\thttp://{}:{}/mcp/vision/explain",
+        get_local_ip(),
+        port,
+    )
+    logger.bind(tag=TAG).info(
+        "工具代理接口是\thttp://{}:{}/moss/tools/call",
         get_local_ip(),
         port,
     )

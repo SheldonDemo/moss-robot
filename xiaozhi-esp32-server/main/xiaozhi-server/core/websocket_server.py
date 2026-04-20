@@ -44,6 +44,7 @@ class WebSocketServer:
         self.config = config
         self.logger = setup_logging()
         self.config_lock = asyncio.Lock()
+        self.connections = {}  # device_id -> ConnectionHandler
         modules = initialize_modules(
             self.logger,
             self.config,
@@ -123,11 +124,18 @@ class WebSocketServer:
             self._intent,
             self,  # 传入server实例
         )
+        device_id = headers.get("device-id", None)
         try:
+            if device_id:
+                self.connections[device_id] = handler
+                self.logger.bind(tag=TAG).info(f"设备注册: {device_id}, 当前连接数: {len(self.connections)}")
             await handler.handle_connection(websocket)
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"处理连接时出错: {e}")
         finally:
+            if device_id and device_id in self.connections:
+                del self.connections[device_id]
+                self.logger.bind(tag=TAG).info(f"设备注销: {device_id}, 当前连接数: {len(self.connections)}")
             # 强制关闭连接（如果还没有关闭的话）
             try:
                 # 安全地检查WebSocket状态并关闭
