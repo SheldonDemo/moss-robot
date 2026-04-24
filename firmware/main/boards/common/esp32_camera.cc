@@ -14,7 +14,8 @@
 #define TAG "Esp32Camera"
 
 Esp32Camera::Esp32Camera(const camera_config_t& config) {
-    qvga_config_ = config;
+    vga_config_ = config;
+    vga_config_.frame_size = FRAMESIZE_VGA;
 
     // camera init
     esp_err_t err = esp_camera_init(&config);
@@ -28,26 +29,13 @@ Esp32Camera::Esp32Camera(const camera_config_t& config) {
         s->set_hmirror(s, 0);
     }
 
-    // 初始化预览图片的内存
+    // 初始化预览图片的内存 (always 320x240 for the LCD)
     memset(&preview_image_, 0, sizeof(preview_image_));
     preview_image_.header.magic = LV_IMAGE_HEADER_MAGIC;
     preview_image_.header.cf = LV_COLOR_FORMAT_RGB565;
     preview_image_.header.flags = 0;
-
-    switch (config.frame_size) {
-        case FRAMESIZE_QVGA:
-            preview_image_.header.w = 320;
-            preview_image_.header.h = 240;
-            break;
-        case FRAMESIZE_VGA:
-            preview_image_.header.w = 640;
-            preview_image_.header.h = 480;
-            break;
-        default:
-            preview_image_.header.w = 320;
-            preview_image_.header.h = 240;
-            break;
-    }
+    preview_image_.header.w = 320;
+    preview_image_.header.h = 240;
 
     preview_image_.header.stride = preview_image_.header.w * 2;
     preview_image_.data_size = preview_image_.header.w * preview_image_.header.h * 2;
@@ -56,10 +44,12 @@ Esp32Camera::Esp32Camera(const camera_config_t& config) {
         ESP_LOGE(TAG, "Failed to allocate memory for preview image");
         return;
     }
+
+    ApplyRegisterTuning();
 }
 
 bool Esp32Camera::ReconfigureToUXGA() {
-    camera_config_t uxga_config = qvga_config_;
+    camera_config_t uxga_config = vga_config_;
     uxga_config.frame_size = FRAMESIZE_UXGA;
     uxga_config.fb_count = 1;
 
@@ -73,7 +63,7 @@ bool Esp32Camera::ReconfigureToUXGA() {
     return true;
 }
 
-void Esp32Camera::ReconfigureToQVGA() {
+void Esp32Camera::ReconfigureToVGA() {
     if (!high_res_mode_) return;
 
     if (fb_ != nullptr) {
@@ -81,10 +71,10 @@ void Esp32Camera::ReconfigureToQVGA() {
         fb_ = nullptr;
     }
 
-    ESP_LOGI(TAG, "Reverting camera to QVGA 320x240");
-    esp_err_t err = esp_camera_reconfigure(&qvga_config_);
+    ESP_LOGI(TAG, "Reverting camera to VGA 640x480");
+    esp_err_t err = esp_camera_reconfigure(&vga_config_);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "QVGA reconfigure failed: 0x%x", err);
+        ESP_LOGE(TAG, "VGA reconfigure failed: 0x%x", err);
     }
     high_res_mode_ = false;
 }
@@ -150,7 +140,7 @@ bool Esp32Camera::Capture() {
 
     // Return to QVGA if we're still in UXGA from a previous capture
     if (high_res_mode_) {
-        ReconfigureToQVGA();
+        ReconfigureToVGA();
     }
 
     // Reconfigure to UXGA for high-quality still capture (GC2145 native 1600x1200)
@@ -167,7 +157,7 @@ bool Esp32Camera::Capture() {
         fb_ = esp_camera_fb_get();
         if (fb_ == nullptr) {
             ESP_LOGE(TAG, "Camera capture failed during warmup (frame %d)", i);
-            ReconfigureToQVGA();
+            ReconfigureToVGA();
             return false;
         }
     }
@@ -213,7 +203,7 @@ bool Esp32Camera::SetVFlip(bool enabled) {
 
 std::string Esp32Camera::Explain(const std::string& question) {
     if (explain_url_.empty()) {
-        ReconfigureToQVGA();
+        ReconfigureToVGA();
         return "{\"success\": false, \"message\": \"Image explain URL or token is not set\"}";
     }
 
@@ -221,7 +211,7 @@ std::string Esp32Camera::Explain(const std::string& question) {
     QueueHandle_t jpeg_queue = xQueueCreate(40, sizeof(JpegChunk));
     if (jpeg_queue == nullptr) {
         ESP_LOGE(TAG, "Failed to create JPEG queue");
-        ReconfigureToQVGA();
+        ReconfigureToVGA();
         return "{\"success\": false, \"message\": \"Failed to create JPEG queue\"}";
     }
 
@@ -262,7 +252,7 @@ std::string Esp32Camera::Explain(const std::string& question) {
             }
         }
         vQueueDelete(jpeg_queue);
-        ReconfigureToQVGA();
+        ReconfigureToVGA();
         return "{\"success\": false, \"message\": \"Failed to connect to explain URL\"}";
     }
 
@@ -309,7 +299,7 @@ std::string Esp32Camera::Explain(const std::string& question) {
 
     if (http->GetStatusCode() != 200) {
         ESP_LOGE(TAG, "Failed to upload photo, status code: %d", http->GetStatusCode());
-        ReconfigureToQVGA();
+        ReconfigureToVGA();
         return "{\"success\": false, \"message\": \"Failed to upload photo\"}";
     }
 
@@ -320,7 +310,7 @@ std::string Esp32Camera::Explain(const std::string& question) {
         fb_->width, fb_->height, (int)total_sent);
     ESP_LOGI(TAG, "VLM response: %s", result.c_str());
 
-    ReconfigureToQVGA();
+    ReconfigureToVGA();
 
     return result;
 }
@@ -348,20 +338,39 @@ void Esp32Camera::PreviewLoop() {
             continue;
         }
 
-        // Convert frame to preview buffer (same logic as UpdatePreview)
+        // Convert frame to preview buffer
         if (preview_image_.data != nullptr && preview_image_.data_size > 0) {
             auto src = (uint16_t*)fb->buf;
             auto dst = (uint16_t*)preview_image_.data;
             int src_w = fb->width;
-            int src_h = fb->height;
             int dst_w = preview_image_.header.w;
             int dst_h = preview_image_.header.h;
 
-            for (int y = 0; y < dst_h; y++) {
-                int src_y = y * src_h / dst_h;
-                for (int x = 0; x < dst_w; x++) {
-                    int src_x = x * src_w / dst_w;
-                    dst[y * dst_w + x] = __builtin_bswap16(src[src_y * src_w + src_x]);
+            // When source is exactly 2× display size, use box filter for anti-aliased downscale
+            if (src_w == dst_w * 2 && fb->height == dst_h * 2) {
+                for (int y = 0; y < dst_h; y++) {
+                    for (int x = 0; x < dst_w; x++) {
+                        int sx = x * 2;
+                        int sy = y * 2;
+                        // Average 4 source pixels per channel for clean anti-aliasing
+                        uint32_t p0 = __builtin_bswap16(src[sy * src_w + sx]);
+                        uint32_t p1 = __builtin_bswap16(src[sy * src_w + sx + 1]);
+                        uint32_t p2 = __builtin_bswap16(src[(sy + 1) * src_w + sx]);
+                        uint32_t p3 = __builtin_bswap16(src[(sy + 1) * src_w + sx + 1]);
+                        uint32_t r = (p0 >> 11) + (p1 >> 11) + (p2 >> 11) + (p3 >> 11);
+                        uint32_t g = ((p0 >> 5) & 0x3f) + ((p1 >> 5) & 0x3f) + ((p2 >> 5) & 0x3f) + ((p3 >> 5) & 0x3f);
+                        uint32_t b = (p0 & 0x1f) + (p1 & 0x1f) + (p2 & 0x1f) + (p3 & 0x1f);
+                        dst[y * dst_w + x] = ((r >> 2) << 11) | ((g >> 2) << 5) | (b >> 2);
+                    }
+                }
+            } else {
+                // Generic nearest-neighbor downscale for other resolutions
+                for (int y = 0; y < dst_h; y++) {
+                    int src_y = y * fb->height / dst_h;
+                    for (int x = 0; x < dst_w; x++) {
+                        int src_x = x * src_w / dst_w;
+                        dst[y * dst_w + x] = __builtin_bswap16(src[src_y * src_w + src_x]);
+                    }
                 }
             }
 
