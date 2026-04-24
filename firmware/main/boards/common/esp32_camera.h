@@ -23,12 +23,13 @@ private:
     std::string explain_url_;
     std::string explain_token_;
     std::thread encoder_thread_;
-    camera_config_t vga_config_;
+    camera_config_t preview_config_;
     bool high_res_mode_ = false;
     bool preview_running_ = false;
     TaskHandle_t preview_task_ = nullptr;
 
     void UpdatePreview();
+    void DownscaleToPreview(const camera_fb_t* fb);
     bool ReconfigureToUXGA();
     void ReconfigureToVGA();
     void ApplyRegisterTuning();

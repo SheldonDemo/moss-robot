@@ -37,7 +37,7 @@ moss-robot/
 - **MCU**: ESP32-S3 (16MB Flash, PSRAM OPI)
 - **音频**: ES8311 编解码芯片 (I2C 地址 0x18), I2S 接口, XL9555 控制功放静音
 - **屏幕**: ST7789 320x240 LCD (SPI), LVGL UI, 支持亮色/暗色双主题
-- **摄像头**: GC2145 (8-bit 并口, QVGA 320x240, XCLK 15MHz)
+- **摄像头**: GC2145 (8-bit 并口, VGA 640x480 预览 / UXGA 1600x1200 拍照, 2x2 盒型滤波降采样, ISP 极限调优)
 - **底盘**: CyberBrick 差速驱动小车 (ESP32-C3, ESP-NOW 控制, 20Hz)
 - **IO 扩展**: XL9555 (I2C 地址 0x20), 控制屏幕背光 + 功放使能
 - **按键**: GPIO 0 (BOOT) - 短按对话, 长按重置 WiFi
@@ -224,6 +224,7 @@ WhatsApp/Telegram 用户: "MOSS，把音量调到50"
 - [x] CyberBrick 叉车底盘控制 (ESP-NOW, 6个MCP工具: move/turn/stop/lift/light/pair)
 - [x] MJPEG 视频流 (port 81, 按需启动 via MCP)
 - [x] LCD 实时预览 (~10 FPS, 按需启动 via MCP)
+- [x] 摄像头 ISP 极限调优 — GC2145 边缘增强/饱和度/对比度/降噪/伽马全寄存器调优
 - [x] 本地实时视觉 Agent (YOLOv8n, 37 FPS on M-series, 人物跟随 demo)
 - [x] 超声波/RGB灯/点阵屏/风扇 MCP 工具
 - [x] OpenClaw 技能更新 (SKILL.md v0.8.0, 21个工具全部注册)
@@ -232,7 +233,6 @@ WhatsApp/Telegram 用户: "MOSS，把音量调到50"
 
 - BOOT 键长按会意外触发 WiFi 重置（需要加防抖）
 - 服务器需要手动启动 (`python app.py`)
-- **摄像头拍照/视频画质差** — GC2145 在 QVGA (320x240) 分辨率下画面模糊，颜色偏差大。UXGA 拍照模式切换后画质有改善但仍有偏色问题。需要进一步调优 sensor 寄存器参数（曝光、白平衡、对比度等）
 - MJPEG 流和 LCD 预览共用摄像头帧缓冲，同时运行时会争抢导致帧率下降
 
 ---
@@ -258,8 +258,8 @@ WhatsApp/Telegram 用户: "MOSS，把音量调到50"
 
 ### 第三阶段：视觉与交互
 
-- [ ] **端到端拍照测试** - 验证完整的拍照→上传→VLLM分析→回复流程
-- [ ] **摄像头画质调优** - 改善 GC2145 的曝光、白平衡和清晰度
+- [x] **端到端拍照测试** - 验证完整的拍照→上传→VLLM分析→回复流程
+- [x] **摄像头画质调优** - GC2145 ISP 极限调优：VGA 预览 + 盒型滤波 + 边缘增强/饱和度/对比度/降噪全寄存器优化
 - [ ] **主动拍照** - OpenClaw Agent 主动调用摄像头获取环境上下文
 - [ ] **显示动画** - 空闲/思考/说话时的 LCD 动画效果
 
@@ -276,7 +276,7 @@ WhatsApp/Telegram 用户: "MOSS，把音量调到50"
 - [x] **MJPEG 视频流** - ESP32 port 81, 按需启动
 - [x] **LCD 实时预览** - ~10 FPS, 语音控制开关
 - [x] **本地视觉 Agent** - YOLOv8n + 人物跟随 demo (vision_agent/)
-- [ ] **摄像头画质调优** - 改善 GC2145 拍照/视频的清晰度和色彩还原
+- [x] **摄像头画质调优** - GC2145 ISP 极限调优完成（VGA 预览 + 盒型滤波 + 全寄存器调优）
 - [ ] **端到端跟随测试** - 视觉 Agent + CyberBrick 实际人物跟随
 
 ### 第六阶段：智能化与个性化

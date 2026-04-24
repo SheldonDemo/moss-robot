@@ -14,8 +14,8 @@
 #define TAG "Esp32Camera"
 
 Esp32Camera::Esp32Camera(const camera_config_t& config) {
-    vga_config_ = config;
-    vga_config_.frame_size = FRAMESIZE_VGA;
+    preview_config_ = config;
+    preview_config_.frame_size = FRAMESIZE_VGA;
 
     // camera init
     esp_err_t err = esp_camera_init(&config);
@@ -49,17 +49,18 @@ Esp32Camera::Esp32Camera(const camera_config_t& config) {
 }
 
 bool Esp32Camera::ReconfigureToUXGA() {
-    camera_config_t uxga_config = vga_config_;
+    camera_config_t uxga_config = preview_config_;
     uxga_config.frame_size = FRAMESIZE_UXGA;
     uxga_config.fb_count = 1;
 
     ESP_LOGI(TAG, "Reconfiguring camera to UXGA 1600x1200");
     esp_err_t err = esp_camera_reconfigure(&uxga_config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "UXGA reconfigure failed: 0x%x, falling back to QVGA", err);
+        ESP_LOGE(TAG, "UXGA reconfigure failed: 0x%x, falling back to VGA", err);
         return false;
     }
     high_res_mode_ = true;
+    ApplyRegisterTuning();
     return true;
 }
 
@@ -72,22 +73,35 @@ void Esp32Camera::ReconfigureToVGA() {
     }
 
     ESP_LOGI(TAG, "Reverting camera to VGA 640x480");
-    esp_err_t err = esp_camera_reconfigure(&vga_config_);
+    esp_err_t err = esp_camera_reconfigure(&preview_config_);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "VGA reconfigure failed: 0x%x", err);
     }
     high_res_mode_ = false;
+    ApplyRegisterTuning();
 }
 
 void Esp32Camera::ApplyRegisterTuning() {
     sensor_t *s = esp_camera_sensor_get();
     if (s == nullptr) return;
 
-    // Mild edge enhancement only — gain and AEC left at sensor defaults
-    // to avoid overexposure and color cast seen with aggressive tuning.
-    // Edge enhancement (page 2, reg 0xdd): default 0x14 → 0x1a
+    // PCLK divider — the gc2145 driver only applies this for ESP32 (to keep
+    // PCLK ≤ 15 MHz), but our board routing can't reliably handle the default
+    // ~45 MHz PCLK either.  Without the divider the CAM peripheral samples
+    // corrupted pixel data, producing colored blocks.
+    s->set_reg(s, 0xfe, 0xff, 0x00);
+    s->set_reg(s, 0xf8, 0x3f, 0x02);   // PLL divider m: default 3 → 2
+    s->set_reg(s, 0xfa, 0x70, 0x20);   // divide_by:      default 0 → 2
+
+    // ISP tuning — maximum quality: reduce denoise, push EE and YCP.
     s->set_reg(s, 0xfe, 0xff, 0x02);
-    s->set_reg(s, 0xdd, 0xff, 0x1a);
+    s->set_reg(s, 0x80, 0x03, 0x00);   // denoise level: 1→0 (less smoothing = sharper)
+    s->set_reg(s, 0x82, 0xff, 0x10);   // denoise signal a thresh: 0x08→0x10
+    s->set_reg(s, 0x83, 0xff, 0x10);   // denoise signal b thresh: 0x08→0x10
+    s->set_reg(s, 0xdd, 0xff, 0x38);   // edge enhancement: 0x14 → 0x38
+    s->set_reg(s, 0x97, 0xff, 0x80);   // edge effect:      0x64 → 0x80
+    s->set_reg(s, 0xd2, 0xff, 0x55);   // saturation:       0x30 → 0x55
+    s->set_reg(s, 0xd1, 0xff, 0x45);   // contrast:         0x30 → 0x45
     s->set_reg(s, 0xfe, 0xff, 0x00);
 }
 
@@ -116,21 +130,39 @@ void Esp32Camera::UpdatePreview() {
     auto display = Board::GetInstance().GetDisplay();
     if (display == nullptr) return;
 
-    auto src = (uint16_t*)fb_->buf;
+    DownscaleToPreview(fb_);
+    display->SetPreviewImage(&preview_image_);
+}
+
+void Esp32Camera::DownscaleToPreview(const camera_fb_t* fb) {
+    auto src = (const uint16_t*)fb->buf;
     auto dst = (uint16_t*)preview_image_.data;
-    int src_w = fb_->width;
+    int src_w = fb->width;
+    int src_h = fb->height;
     int dst_w = preview_image_.header.w;
     int dst_h = preview_image_.header.h;
 
-    int src_h = fb_->height;
+    // 2x2 box filter (anti-aliased downscale) — camera data is big-endian
+    // RGB565 from sensor, converted to little-endian for LVGL.
     for (int y = 0; y < dst_h; y++) {
-        int src_y = y * src_h / dst_h;
         for (int x = 0; x < dst_w; x++) {
-            int src_x = x * src_w / dst_w;
-            dst[y * dst_w + x] = __builtin_bswap16(src[src_y * src_w + src_x]);
+            int sx = x * src_w / dst_w;
+            int sy = y * src_h / dst_h;
+
+            uint32_t r = 0, g = 0, b = 0;
+            int count = 0;
+            for (int dy = 0; dy < 2 && sy + dy < src_h; dy++) {
+                for (int dx = 0; dx < 2 && sx + dx < src_w; dx++) {
+                    uint16_t p = __builtin_bswap16(src[(sy + dy) * src_w + (sx + dx)]);
+                    r += (p >> 11) & 0x1f;
+                    g += (p >> 5) & 0x3f;
+                    b += p & 0x1f;
+                    count++;
+                }
+            }
+            dst[y * dst_w + x] = ((r / count) << 11) | ((g / count) << 5) | (b / count);
         }
     }
-    display->SetPreviewImage(&preview_image_);
 }
 
 bool Esp32Camera::Capture() {
@@ -138,14 +170,14 @@ bool Esp32Camera::Capture() {
         encoder_thread_.join();
     }
 
-    // Return to QVGA if we're still in UXGA from a previous capture
+    // Return to VGA if we're still in UXGA from a previous capture
     if (high_res_mode_) {
         ReconfigureToVGA();
     }
 
     // Reconfigure to UXGA for high-quality still capture (GC2145 native 1600x1200)
     if (!ReconfigureToUXGA()) {
-        ESP_LOGW(TAG, "UXGA reconfigure failed, falling back to QVGA capture");
+        ESP_LOGW(TAG, "UXGA reconfigure failed, falling back to VGA capture");
     }
 
     // 3 warmup frames for AEC/AWB stabilization
@@ -338,42 +370,9 @@ void Esp32Camera::PreviewLoop() {
             continue;
         }
 
-        // Convert frame to preview buffer
+        // Downscale VGA → QVGA with 2x2 box filter for the LCD
         if (preview_image_.data != nullptr && preview_image_.data_size > 0) {
-            auto src = (uint16_t*)fb->buf;
-            auto dst = (uint16_t*)preview_image_.data;
-            int src_w = fb->width;
-            int dst_w = preview_image_.header.w;
-            int dst_h = preview_image_.header.h;
-
-            // When source is exactly 2× display size, use box filter for anti-aliased downscale
-            if (src_w == dst_w * 2 && fb->height == dst_h * 2) {
-                for (int y = 0; y < dst_h; y++) {
-                    for (int x = 0; x < dst_w; x++) {
-                        int sx = x * 2;
-                        int sy = y * 2;
-                        // Average 4 source pixels per channel for clean anti-aliasing
-                        uint32_t p0 = __builtin_bswap16(src[sy * src_w + sx]);
-                        uint32_t p1 = __builtin_bswap16(src[sy * src_w + sx + 1]);
-                        uint32_t p2 = __builtin_bswap16(src[(sy + 1) * src_w + sx]);
-                        uint32_t p3 = __builtin_bswap16(src[(sy + 1) * src_w + sx + 1]);
-                        uint32_t r = (p0 >> 11) + (p1 >> 11) + (p2 >> 11) + (p3 >> 11);
-                        uint32_t g = ((p0 >> 5) & 0x3f) + ((p1 >> 5) & 0x3f) + ((p2 >> 5) & 0x3f) + ((p3 >> 5) & 0x3f);
-                        uint32_t b = (p0 & 0x1f) + (p1 & 0x1f) + (p2 & 0x1f) + (p3 & 0x1f);
-                        dst[y * dst_w + x] = ((r >> 2) << 11) | ((g >> 2) << 5) | (b >> 2);
-                    }
-                }
-            } else {
-                // Generic nearest-neighbor downscale for other resolutions
-                for (int y = 0; y < dst_h; y++) {
-                    int src_y = y * fb->height / dst_h;
-                    for (int x = 0; x < dst_w; x++) {
-                        int src_x = x * src_w / dst_w;
-                        dst[y * dst_w + x] = __builtin_bswap16(src[src_y * src_w + src_x]);
-                    }
-                }
-            }
-
+            DownscaleToPreview(fb);
             if (display) {
                 display->SetPreviewImage(&preview_image_);
             }
