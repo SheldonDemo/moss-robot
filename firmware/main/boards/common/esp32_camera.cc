@@ -132,8 +132,9 @@ void Esp32Camera::UpdatePreview() {
     int dst_w = preview_image_.header.w;
     int dst_h = preview_image_.header.h;
 
+    int src_h = fb_->height;
     for (int y = 0; y < dst_h; y++) {
-        int src_y = y * src_w / dst_h;
+        int src_y = y * src_h / dst_h;
         for (int x = 0; x < dst_w; x++) {
             int src_x = x * src_w / dst_w;
             dst[y * dst_w + x] = __builtin_bswap16(src[src_y * src_w + src_x]);
@@ -352,11 +353,12 @@ void Esp32Camera::PreviewLoop() {
             auto src = (uint16_t*)fb->buf;
             auto dst = (uint16_t*)preview_image_.data;
             int src_w = fb->width;
+            int src_h = fb->height;
             int dst_w = preview_image_.header.w;
             int dst_h = preview_image_.header.h;
 
             for (int y = 0; y < dst_h; y++) {
-                int src_y = y * src_w / dst_h;
+                int src_y = y * src_h / dst_h;
                 for (int x = 0; x < dst_w; x++) {
                     int src_x = x * src_w / dst_w;
                     dst[y * dst_w + x] = __builtin_bswap16(src[src_y * src_w + src_x]);
