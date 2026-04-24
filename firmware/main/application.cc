@@ -11,6 +11,10 @@
 #include "settings.h"
 #include "ssid_manager.h"
 
+#if CONFIG_ENABLE_FORKLIFT_CONTROL
+#include "forklift_controller.h"
+#endif
+
 #include <cstring>
 #include <esp_log.h>
 #include <cJSON.h>
@@ -403,6 +407,14 @@ void Application::Start() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
+
+            // MOSS: Auto-reconnect on unexpected disconnect
+#if CONFIG_MOSS_AUTO_CONNECT_WS
+            ESP_LOGI(TAG, "MOSS: WebSocket closed, auto-reconnecting...");
+            if (!protocol_->OpenAudioChannel()) {
+                ESP_LOGW(TAG, "MOSS: Reconnect failed, will retry on next interaction");
+            }
+#endif
         });
     });
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
@@ -508,6 +520,23 @@ void Application::Start() {
     }
 
     McpServer::GetInstance().AddCommonTools();
+
+    // MOSS: Auto-initialize ESP-NOW for forklift control
+#if CONFIG_ENABLE_FORKLIFT_CONTROL && CONFIG_MOSS_AUTO_INIT_ESPNOW
+    auto& fc = ForkliftController::GetInstance();
+    if (!fc.IsInitialized()) {
+        ESP_LOGI(TAG, "MOSS: Auto-initializing ESP-NOW...");
+        fc.Initialize();
+    }
+#endif
+
+    // MOSS: Auto-connect WebSocket to make MCP tools available immediately
+#if CONFIG_MOSS_AUTO_CONNECT_WS
+    if (!protocol_->IsAudioChannelOpened()) {
+        ESP_LOGI(TAG, "MOSS: Auto-connecting WebSocket...");
+        protocol_->OpenAudioChannel();
+    }
+#endif
 
     // Print heap stats
     SystemInfo::PrintHeapStats();

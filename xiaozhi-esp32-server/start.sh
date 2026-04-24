@@ -2,7 +2,7 @@
 # MOSS 一键启动小智服务器
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SERVER_DIR="$SCRIPT_DIR/xiaozhi-esp32-server/main/xiaozhi-server"
+SERVER_DIR="$SCRIPT_DIR/main/xiaozhi-server"
 VENV_DIR="$SERVER_DIR/venv"
 
 # 检查是否已在运行

@@ -7,11 +7,15 @@
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <img_converters.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <cstring>
 
 #define TAG "Esp32Camera"
 
 Esp32Camera::Esp32Camera(const camera_config_t& config) {
+    qvga_config_ = config;
+
     // camera init
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
@@ -31,31 +35,18 @@ Esp32Camera::Esp32Camera(const camera_config_t& config) {
     preview_image_.header.flags = 0;
 
     switch (config.frame_size) {
-        case FRAMESIZE_SVGA:
-            preview_image_.header.w = 800;
-            preview_image_.header.h = 600;
+        case FRAMESIZE_QVGA:
+            preview_image_.header.w = 320;
+            preview_image_.header.h = 240;
             break;
         case FRAMESIZE_VGA:
             preview_image_.header.w = 640;
             preview_image_.header.h = 480;
             break;
-        case FRAMESIZE_QVGA:
+        default:
             preview_image_.header.w = 320;
             preview_image_.header.h = 240;
             break;
-        case FRAMESIZE_128X128:
-            preview_image_.header.w = 128;
-            preview_image_.header.h = 128;
-            break;
-        case FRAMESIZE_240X240:
-            preview_image_.header.w = 240;
-            preview_image_.header.h = 240;
-            break;
-        default:
-            ESP_LOGE(TAG, "Unsupported frame size: %d, image preview will not be shown", config.frame_size);
-            preview_image_.data_size = 0;
-            preview_image_.data = nullptr;
-            return;
     }
 
     preview_image_.header.stride = preview_image_.header.w * 2;
@@ -67,7 +58,51 @@ Esp32Camera::Esp32Camera(const camera_config_t& config) {
     }
 }
 
+bool Esp32Camera::ReconfigureToUXGA() {
+    camera_config_t uxga_config = qvga_config_;
+    uxga_config.frame_size = FRAMESIZE_UXGA;
+    uxga_config.fb_count = 1;
+
+    ESP_LOGI(TAG, "Reconfiguring camera to UXGA 1600x1200");
+    esp_err_t err = esp_camera_reconfigure(&uxga_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "UXGA reconfigure failed: 0x%x, falling back to QVGA", err);
+        return false;
+    }
+    high_res_mode_ = true;
+    return true;
+}
+
+void Esp32Camera::ReconfigureToQVGA() {
+    if (!high_res_mode_) return;
+
+    if (fb_ != nullptr) {
+        esp_camera_fb_return(fb_);
+        fb_ = nullptr;
+    }
+
+    ESP_LOGI(TAG, "Reverting camera to QVGA 320x240");
+    esp_err_t err = esp_camera_reconfigure(&qvga_config_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "QVGA reconfigure failed: 0x%x", err);
+    }
+    high_res_mode_ = false;
+}
+
+void Esp32Camera::ApplyRegisterTuning() {
+    sensor_t *s = esp_camera_sensor_get();
+    if (s == nullptr) return;
+
+    // Mild edge enhancement only — gain and AEC left at sensor defaults
+    // to avoid overexposure and color cast seen with aggressive tuning.
+    // Edge enhancement (page 2, reg 0xdd): default 0x14 → 0x1a
+    s->set_reg(s, 0xfe, 0xff, 0x02);
+    s->set_reg(s, 0xdd, 0xff, 0x1a);
+    s->set_reg(s, 0xfe, 0xff, 0x00);
+}
+
 Esp32Camera::~Esp32Camera() {
+    StopPreview();
     if (fb_) {
         esp_camera_fb_return(fb_);
         fb_ = nullptr;
@@ -89,54 +124,22 @@ void Esp32Camera::UpdatePreview() {
         return;
     }
     auto display = Board::GetInstance().GetDisplay();
-    if (display != nullptr) {
-        auto src = (uint16_t*)fb_->buf;
-        auto dst = (uint16_t*)preview_image_.data;
-        size_t pixel_count = fb_->len / 2;
-        for (size_t i = 0; i < pixel_count; i++) {
-            dst[i] = __builtin_bswap16(src[i]);
+    if (display == nullptr) return;
+
+    auto src = (uint16_t*)fb_->buf;
+    auto dst = (uint16_t*)preview_image_.data;
+    int src_w = fb_->width;
+    int dst_w = preview_image_.header.w;
+    int dst_h = preview_image_.header.h;
+
+    for (int y = 0; y < dst_h; y++) {
+        int src_y = y * src_w / dst_h;
+        for (int x = 0; x < dst_w; x++) {
+            int src_x = x * src_w / dst_w;
+            dst[y * dst_w + x] = __builtin_bswap16(src[src_y * src_w + src_x]);
         }
-        display->SetPreviewImage(&preview_image_);
     }
-}
-
-int Esp32Camera::CalculateMeanBrightness() {
-    if (fb_ == nullptr) return 0;
-    auto pixels = (uint16_t*)fb_->buf;
-    size_t count = fb_->len / 2;
-    // 每隔4个像素采样，提取绿色通道 (RGB565 bit[10:5])
-    int64_t sum = 0;
-    size_t sampled = 0;
-    for (size_t i = 0; i < count; i += 4) {
-        uint16_t green565 = (pixels[i] >> 5) & 0x3F;
-        sum += green565;
-        sampled++;
-    }
-    return (sampled > 0) ? (int)(sum / sampled) : 0;
-}
-
-int Esp32Camera::CalculateBrightnessVariance(int mean) {
-    if (fb_ == nullptr) return 0;
-    auto pixels = (uint16_t*)fb_->buf;
-    size_t count = fb_->len / 2;
-    int64_t sum_sq = 0;
-    size_t sampled = 0;
-    for (size_t i = 0; i < count; i += 4) {
-        uint16_t green565 = (pixels[i] >> 5) & 0x3F;
-        int diff = (int)green565 - mean;
-        sum_sq += diff * diff;
-        sampled++;
-    }
-    return (sampled > 0) ? (int)(sum_sq / sampled) : 0;
-}
-
-bool Esp32Camera::IsFrameAcceptable() {
-    last_brightness_ = CalculateMeanBrightness();
-    last_variance_ = CalculateBrightnessVariance(last_brightness_);
-    ESP_LOGI(TAG, "Quality check: brightness=%d, variance=%d", last_brightness_, last_variance_);
-    return last_brightness_ >= kMinBrightness &&
-           last_brightness_ <= kMaxBrightness &&
-           last_variance_ >= kMinVariance;
+    display->SetPreviewImage(&preview_image_);
 }
 
 bool Esp32Camera::Capture() {
@@ -144,45 +147,32 @@ bool Esp32Camera::Capture() {
         encoder_thread_.join();
     }
 
-    // Phase 1: 预热帧，让AE/AWB稳定
-    for (int i = 0; i < kMinWarmupFrames; i++) {
+    // Return to QVGA if we're still in UXGA from a previous capture
+    if (high_res_mode_) {
+        ReconfigureToQVGA();
+    }
+
+    // Reconfigure to UXGA for high-quality still capture (GC2145 native 1600x1200)
+    if (!ReconfigureToUXGA()) {
+        ESP_LOGW(TAG, "UXGA reconfigure failed, falling back to QVGA capture");
+    }
+
+    // 3 warmup frames for AEC/AWB stabilization
+    for (int i = 0; i < 3; i++) {
         if (fb_ != nullptr) {
             esp_camera_fb_return(fb_);
+            fb_ = nullptr;
         }
         fb_ = esp_camera_fb_get();
         if (fb_ == nullptr) {
             ESP_LOGE(TAG, "Camera capture failed during warmup (frame %d)", i);
+            ReconfigureToQVGA();
             return false;
         }
-        // 每帧更新预览，用户能看到机器人在"看"
-        UpdatePreview();
     }
 
-    // Phase 2: 质量检测，不合格则重试
-    int retry_count = 0;
-    while (retry_count < kMaxQualityRetries) {
-        if (IsFrameAcceptable()) {
-            break;
-        }
-        ESP_LOGW(TAG, "Frame quality poor (brightness=%d, variance=%d), retry %d/%d",
-                 last_brightness_, last_variance_, retry_count + 1, kMaxQualityRetries);
-        // 多抓几帧让曝光继续稳定
-        for (int i = 0; i < kRetryExtraFrames; i++) {
-            if (fb_ != nullptr) {
-                esp_camera_fb_return(fb_);
-            }
-            fb_ = esp_camera_fb_get();
-            if (fb_ == nullptr) {
-                ESP_LOGE(TAG, "Camera capture failed during retry");
-                return false;
-            }
-            UpdatePreview();
-        }
-        retry_count++;
-    }
-
-    ESP_LOGI(TAG, "Capture complete: brightness=%d, variance=%d, retries=%d",
-             last_brightness_, last_variance_, retry_count);
+    ESP_LOGI(TAG, "Capture complete: %dx%d", fb_->width, fb_->height);
+    UpdatePreview();
     return true;
 }
 
@@ -222,27 +212,21 @@ bool Esp32Camera::SetVFlip(bool enabled) {
 
 std::string Esp32Camera::Explain(const std::string& question) {
     if (explain_url_.empty()) {
+        ReconfigureToQVGA();
         return "{\"success\": false, \"message\": \"Image explain URL or token is not set\"}";
     }
-
-    // 在问题中加入图像质量上下文，让VLLM了解拍摄条件
-    std::string quality_context = "[图像质量: 亮度=" + std::to_string(last_brightness_) +
-        ", 对比度=" + std::to_string(last_variance_) + "]";
-    if (last_brightness_ < kMinBrightness + 20) {
-        quality_context += " 注意：图像可能偏暗，请根据可见内容尽量回答。";
-    }
-    std::string full_question = quality_context + " " + question;
 
     // 创建局部的 JPEG 队列
     QueueHandle_t jpeg_queue = xQueueCreate(40, sizeof(JpegChunk));
     if (jpeg_queue == nullptr) {
         ESP_LOGE(TAG, "Failed to create JPEG queue");
+        ReconfigureToQVGA();
         return "{\"success\": false, \"message\": \"Failed to create JPEG queue\"}";
     }
 
     // 使用独立线程编码JPEG
     encoder_thread_ = std::thread([this, jpeg_queue]() {
-        frame2jpg_cb(fb_, 80, [](void* arg, size_t index, const void* data, size_t len) -> unsigned int {
+        frame2jpg_cb(fb_, 90, [](void* arg, size_t index, const void* data, size_t len) -> unsigned int {
             auto jpeg_queue = (QueueHandle_t)arg;
             JpegChunk chunk = {
                 .data = (uint8_t*)heap_caps_aligned_alloc(16, len, MALLOC_CAP_SPIRAM),
@@ -277,6 +261,7 @@ std::string Esp32Camera::Explain(const std::string& question) {
             }
         }
         vQueueDelete(jpeg_queue);
+        ReconfigureToQVGA();
         return "{\"success\": false, \"message\": \"Failed to connect to explain URL\"}";
     }
 
@@ -285,7 +270,7 @@ std::string Esp32Camera::Explain(const std::string& question) {
         question_field += "--" + boundary + "\r\n";
         question_field += "Content-Disposition: form-data; name=\"question\"\r\n";
         question_field += "\r\n";
-        question_field += full_question + "\r\n";
+        question_field += question + "\r\n";
         http->Write(question_field.c_str(), question_field.size());
     }
     {
@@ -323,14 +308,93 @@ std::string Esp32Camera::Explain(const std::string& question) {
 
     if (http->GetStatusCode() != 200) {
         ESP_LOGE(TAG, "Failed to upload photo, status code: %d", http->GetStatusCode());
+        ReconfigureToQVGA();
         return "{\"success\": false, \"message\": \"Failed to upload photo\"}";
     }
 
     std::string result = http->ReadAll();
     http->Close();
 
-    size_t remain_stack_size = uxTaskGetStackHighWaterMark(nullptr);
-    ESP_LOGI(TAG, "Explain image size=%dx%d, compressed size=%d, remain stack=%d, quality=[b=%d,v=%d]\n%s",
-        fb_->width, fb_->height, total_sent, remain_stack_size, last_brightness_, last_variance_, result.c_str());
+    ESP_LOGI(TAG, "Explain image size=%dx%d, compressed=%d",
+        fb_->width, fb_->height, (int)total_sent);
+    ESP_LOGI(TAG, "VLM response: %s", result.c_str());
+
+    ReconfigureToQVGA();
+
     return result;
+}
+
+void Esp32Camera::PreviewTaskFunc(void* arg) {
+    auto* self = static_cast<Esp32Camera*>(arg);
+    self->PreviewLoop();
+    vTaskDelete(nullptr);
+}
+
+void Esp32Camera::PreviewLoop() {
+    ESP_LOGI(TAG, "Camera preview started");
+    auto display = Board::GetInstance().GetDisplay();
+
+    while (preview_running_) {
+        // Skip if photo capture is in progress
+        if (high_res_mode_) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        camera_fb_t* fb = esp_camera_fb_get();
+        if (fb == nullptr) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        // Convert frame to preview buffer (same logic as UpdatePreview)
+        if (preview_image_.data != nullptr && preview_image_.data_size > 0) {
+            auto src = (uint16_t*)fb->buf;
+            auto dst = (uint16_t*)preview_image_.data;
+            int src_w = fb->width;
+            int dst_w = preview_image_.header.w;
+            int dst_h = preview_image_.header.h;
+
+            for (int y = 0; y < dst_h; y++) {
+                int src_y = y * src_w / dst_h;
+                for (int x = 0; x < dst_w; x++) {
+                    int src_x = x * src_w / dst_w;
+                    dst[y * dst_w + x] = __builtin_bswap16(src[src_y * src_w + src_x]);
+                }
+            }
+
+            if (display) {
+                display->SetPreviewImage(&preview_image_);
+            }
+        }
+
+        esp_camera_fb_return(fb);
+
+        // ~10 FPS
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    ESP_LOGI(TAG, "Camera preview stopped");
+}
+
+void Esp32Camera::StartPreview() {
+    if (preview_running_) return;
+    preview_running_ = true;
+    xTaskCreatePinnedToCore(PreviewTaskFunc, "cam_preview", 4096, this, 2, &preview_task_, 1);
+}
+
+void Esp32Camera::StopPreview() {
+    if (!preview_running_) return;
+    preview_running_ = false;
+    // Task will exit on its own after seeing preview_running_ = false
+    if (preview_task_ != nullptr) {
+        // Give it time to finish
+        vTaskDelay(pdMS_TO_TICKS(200));
+        preview_task_ = nullptr;
+    }
+    // Hide preview, restore emotion display
+    auto display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->SetPreviewImage(nullptr);
+    }
 }

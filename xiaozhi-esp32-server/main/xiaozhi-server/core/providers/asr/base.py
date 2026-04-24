@@ -67,18 +67,20 @@ class ASRProviderBase(ABC):
             # 自动/实时模式：使用VAD检测
             conn.asr_audio.append(audio)
 
-            # 如果没有语音，且之前也没有声音，缓存部分音频
-            if not audio_have_voice and not conn.client_have_voice:
-                conn.asr_audio = conn.asr_audio[-10:]
-                return
-
             # 自动模式下通过VAD检测到语音停止时触发识别
+            # 优先检查endpoint，避免静音帧的trim提前return导致endpoint丢失
             if conn.asr.interface_type != InterfaceType.STREAM and conn.client_voice_stop:
                 asr_audio_task = conn.asr_audio.copy()
                 conn.reset_audio_states()
 
                 if len(asr_audio_task) > 15:
                     await self.handle_voice_stop(conn, asr_audio_task)
+                return
+
+            # 如果没有语音，且之前也没有声音，缓存部分音频
+            if not audio_have_voice and not conn.client_have_voice:
+                conn.asr_audio = conn.asr_audio[-10:]
+                return
 
     # 处理语音停止
     async def handle_voice_stop(self, conn: "ConnectionHandler", asr_audio_task: List[bytes]):

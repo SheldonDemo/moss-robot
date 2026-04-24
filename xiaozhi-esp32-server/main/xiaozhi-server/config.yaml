@@ -84,6 +84,13 @@ tts_audio_send_delay: 0
 exit_commands:
   - "退出"
   - "关闭"
+  - "再见"
+  - "闭嘴"
+  - "安静"
+  - "停止"
+  - "退下"
+  - "别说了"
+  - "行了行了"
 
 xiaozhi:
   type: hello

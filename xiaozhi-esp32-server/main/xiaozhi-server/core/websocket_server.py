@@ -106,7 +106,7 @@ class WebSocketServer:
                     "authorization"
                 ][0]
 
-        """处理新连接，每次创建独立的ConnectionHandler"""
+        """处理新连接，同设备重连时复用对话历史"""
         # 先认证，后建立连接
         try:
             await self._handle_auth(websocket)
@@ -114,6 +114,18 @@ class WebSocketServer:
             await websocket.send("认证失败")
             await websocket.close()
             return
+        device_id = headers.get("device-id", None)
+
+        # 同一设备重连时，保存旧 handler 的对话历史
+        old_handler = self.connections.get(device_id) if device_id else None
+        saved_dialogue = None
+        if old_handler and hasattr(old_handler, 'dialogue'):
+            saved_dialogue = old_handler.dialogue
+            if len(saved_dialogue.dialogue) > 0:
+                self.logger.bind(tag=TAG).info(
+                    f"设备 {device_id} 重连，复用对话历史 ({len(saved_dialogue.dialogue)} 条)"
+                )
+
         # 创建ConnectionHandler时传入当前server实例
         handler = ConnectionHandler(
             self.config,
@@ -124,7 +136,11 @@ class WebSocketServer:
             self._intent,
             self,  # 传入server实例
         )
-        device_id = headers.get("device-id", None)
+
+        # 恢复对话历史
+        if saved_dialogue and len(saved_dialogue.dialogue) > 0:
+            handler.dialogue = saved_dialogue
+
         try:
             if device_id:
                 self.connections[device_id] = handler

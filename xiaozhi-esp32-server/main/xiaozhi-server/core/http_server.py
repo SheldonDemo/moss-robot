@@ -4,6 +4,8 @@ from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
 from core.api.tool_proxy_handler import ToolProxyHandler
+from core.api.robot_tool_handler import RobotToolHandler
+from core.api.mcp_server_handler import McpServerHandler
 
 TAG = __name__
 
@@ -12,10 +14,12 @@ class SimpleHttpServer:
     def __init__(self, config: dict, connections: dict = None):
         self.config = config
         self.logger = setup_logging()
-        self.connections = connections or {}
+        self.connections = connections if connections is not None else {}
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
         self.tool_proxy_handler = ToolProxyHandler(config, self.connections)
+        self.robot_tool_handler = RobotToolHandler(config, self.connections)
+        self.mcp_server_handler = McpServerHandler(config, self.connections)
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """获取websocket地址
@@ -75,10 +79,30 @@ class SimpleHttpServer:
                         web.options(
                             "/mcp/vision/explain", self.vision_handler.handle_options
                         ),
+                        # Photo viewing endpoints
+                        web.get("/photos/latest", self.vision_handler.handle_photo_latest),
+                        web.get("/photos/list", self.vision_handler.handle_photo_list),
                         # OpenClaw 工具代理
                         web.get("/moss/tools/call", self.tool_proxy_handler.handle_get),
                         web.post("/moss/tools/call", self.tool_proxy_handler.handle_post),
                         web.options("/moss/tools/call", self.tool_proxy_handler.handle_options),
+                        # MCP Server (OpenClaw native tools)
+                        web.post("/mcp", self.mcp_server_handler.handle_post),
+                        web.options("/mcp", self.mcp_server_handler.handle_options),
+                        # Robot Tool API
+                        web.post("/robot/move", self.robot_tool_handler.handle_move),
+                        web.post("/robot/turn", self.robot_tool_handler.handle_turn),
+                        web.post("/robot/stop", self.robot_tool_handler.handle_stop),
+                        web.post("/robot/camera/capture", self.robot_tool_handler.handle_camera_capture),
+                        web.get("/robot/status", self.robot_tool_handler.handle_status),
+                        web.get("/robot/health", self.robot_tool_handler.handle_health),
+                        web.post("/moss/session/stop", self.robot_tool_handler.handle_session_stop),
+                        web.options("/moss/session/stop", self.robot_tool_handler.handle_options),
+                        web.options("/robot/move", self.robot_tool_handler.handle_options),
+                        web.options("/robot/turn", self.robot_tool_handler.handle_options),
+                        web.options("/robot/stop", self.robot_tool_handler.handle_options),
+                        web.options("/robot/camera/capture", self.robot_tool_handler.handle_options),
+                        web.options("/robot/status", self.robot_tool_handler.handle_options),
                     ]
                 )
 

@@ -148,7 +148,6 @@ async def handle_mcp_message(
                     f"客户端MCP服务器信息: name={name}, version={version}"
                 )
 
-            await asyncio.sleep(1)
             logger.bind(tag=TAG).debug("初始化完成，开始请求MCP工具列表")
             await send_mcp_tools_list_request(conn)
 
@@ -306,6 +305,7 @@ async def call_mcp_tool(
     if not await mcp_client.is_ready():
         raise RuntimeError("MCP客户端尚未准备就绪")
 
+    tool_name = sanitize_tool_name(tool_name)
     if not mcp_client.has_tool(tool_name):
         raise ValueError(f"工具 {tool_name} 不存在")
 

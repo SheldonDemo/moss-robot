@@ -24,6 +24,35 @@ config OTA_URL
     help
         The application will access this URL to check for new firmwares and server address.
 
+config ENABLE_FORKLIFT_CONTROL
+    bool "Enable ESP-NOW Forklift Control"
+    default y
+    help
+        Enable ESP-NOW based forklift control via MCP tools.
+        Requires a CyberBrick receiver with MicroPython firmware.
+
+config FORKLIFT_DEFAULT_PEER_MAC
+    string "Default Forklift Peer MAC Address"
+    default ""
+    depends on ENABLE_FORKLIFT_CONTROL
+    help
+        MAC address of the forklift receiver (format: "aa:bb:cc:dd:ee:ff").
+        Leave empty to require pairing on first use.
+
+config MOSS_AUTO_CONNECT_WS
+    bool "Auto-connect WebSocket on boot"
+    default y
+    help
+        Automatically establish WebSocket connection after WiFi connects.
+        When enabled, MCP tools are available immediately on wake-up.
+
+config MOSS_AUTO_INIT_ESPNOW
+    bool "Auto-initialize ESP-NOW on boot"
+    default y
+    depends on ENABLE_FORKLIFT_CONTROL
+    help
+        Initialize ESP-NOW for forklift control right after WiFi connects.
+        Previously paired receiver MAC is loaded from NVS automatically.
 
 choice
     prompt "Default Language"

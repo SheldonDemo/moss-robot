@@ -44,6 +44,7 @@ elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_ESP32_LCD)
     set(BOARD_TYPE "bread-compact-esp32-lcd")
 elseif(CONFIG_BOARD_TYPE_HiwonderExploit_S3)
     set(BOARD_TYPE "HiwonderExploit_S3")
+    list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_TYPE})
 elseif(CONFIG_BOARD_TYPE_DF_K10)
     set(BOARD_TYPE "df-k10")
 elseif(CONFIG_BOARD_TYPE_DF_S3_AI_CAM)
@@ -309,6 +310,9 @@ idf_component_register(SRCS ${SOURCES}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     )
+
+# Add esp_http_server dependency for MJPEG streamer
+target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_http_server)
 
 # 使用 target_compile_definitions 来定义 BOARD_TYPE, BOARD_NAME
 # 如果 BOARD_NAME 为空，则使用 BOARD_TYPE

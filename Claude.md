@@ -10,13 +10,22 @@
 moss-robot/
 ├── firmware/                # 小智 ESP32 固件 (ESP-IDF v5.4)
 │   └── main/boards/HiwonderExploit_S3/  # 硬件板级支持包
-├── xiaozhi-esp32-server/    # 小智官方 Python 后端 (音频桥接)
+├── xiaozhi-esp32-server/    # 小智官方 Python 后端 (音频桥接 + Robot Tool API)
 │   └── main/xiaozhi-server/ # 服务器源码
-└── Claude.md                # 本文件
+├── vision_agent/            # 本地实时视觉 Agent (YOLOv8n + 人物跟随)
+│   ├── camera/              # OpenCV 摄像头/MJPEG 流读取
+│   ├── vision/              # YOLOv8n 检测 + 跟踪 + 状态缓存
+│   ├── agent/               # 事件驱动 Agent Loop
+│   ├── tools/               # 工具代理 HTTP 客户端 (robot control)
+│   ├── debug/               # OpenCV 调试叠加层
+│   └── main.py              # CLI 入口
+├── xiaozhi-esp32-server/start.sh  # 小智服务器一键启动
+├── vision_agent/start.sh          # 视觉 Agent 一键启动
+└── Claude.md                      # 本文件
 
 ~/.openclaw/                 # OpenClaw Agent OS (本地)
 ├── workspace/skills/moss-robot/  # MOSS 机器人技能
-│   ├── SKILL.md             # 技能定义 (ESP32 所有能力)
+│   ├── SKILL.md             # 技能定义 (视觉+运动+设备控制)
 │   └── scripts/call_tool.py # 工具调用脚本
 └── openclaw.json            # OpenClaw 配置
 ```
@@ -28,7 +37,8 @@ moss-robot/
 - **MCU**: ESP32-S3 (16MB Flash, PSRAM OPI)
 - **音频**: ES8311 编解码芯片 (I2C 地址 0x18), I2S 接口, XL9555 控制功放静音
 - **屏幕**: ST7789 320x240 LCD (SPI), LVGL UI, 支持亮色/暗色双主题
-- **摄像头**: GC2145/OV2640 (8-bit 并口, QVGA 320x240, XCLK 10MHz)
+- **摄像头**: GC2145 (8-bit 并口, QVGA 320x240, XCLK 15MHz)
+- **底盘**: CyberBrick 差速驱动小车 (ESP32-C3, ESP-NOW 控制, 20Hz)
 - **IO 扩展**: XL9555 (I2C 地址 0x20), 控制屏幕背光 + 功放使能
 - **按键**: GPIO 0 (BOOT) - 短按对话, 长按重置 WiFi
 
@@ -148,6 +158,14 @@ WhatsApp/Telegram 用户: "MOSS，把音量调到50"
 - `self.screen.set_brightness` — 设置屏幕亮度 (0-100)
 - `self.screen.set_theme` — 切换主题 (light/dark)
 - `self.camera.take_photo` — 拍照 + 视觉分析
+- `self.camera.start_preview` — 开启 LCD 实时预览（~10 FPS）
+- `self.camera.stop_preview` — 关闭 LCD 实时预览
+- `self.camera.start_stream` — 启动 MJPEG 视频流 (port 81)
+- `self.ultrasound.get_distance` — 超声波测距 (mm, 最远 5000)
+- `self.ultrasound.set_rgb` — RGB 灯色 (r,g,b + solid/breathing)
+- `self.led_matrix.show/draw/clear/set_brightness` — 16x8 点阵屏
+- `self.fan.set_speed` — 风扇速度 (0-255)
+- `self.forklift.move/turn/stop/lift/light/pair` — CyberBrick 叉车控制
 
 ---
 
@@ -178,8 +196,9 @@ WhatsApp/Telegram 用户: "MOSS，把音量调到50"
 | 端口 | 服务 | 说明 |
 |------|------|------|
 | 8000 | xiaozhi-server WebSocket | ESP32 音频/控制连接 |
-| 8003 | xiaozhi-server HTTP | OTA + 工具代理 (`/moss/tools/call`) |
+| 8003 | xiaozhi-server HTTP | OTA + 工具代理 + Robot Tool API (`/robot/*`) |
 | 18789 | OpenClaw Gateway | Agent OS API |
+| 81 | ESP32 MJPEG Stream | 摄像头视频流 (按需启动) |
 
 ---
 
@@ -201,12 +220,20 @@ WhatsApp/Telegram 用户: "MOSS，把音量调到50"
 - [x] 唤醒词引擎可用 (AFE 唤醒词, 默认关闭)
 - [x] 项目仓库: https://github.com/SheldonDemo/moss-robot
 - [x] OpenClaw Agent OS 集成 (本地 GLM-5 agent)
+- [x] Robot Tool Server (FastAPI, port 8010) — 移动/视觉/状态 RESTful API
+- [x] CyberBrick 叉车底盘控制 (ESP-NOW, 6个MCP工具: move/turn/stop/lift/light/pair)
+- [x] MJPEG 视频流 (port 81, 按需启动 via MCP)
+- [x] LCD 实时预览 (~10 FPS, 按需启动 via MCP)
+- [x] 本地实时视觉 Agent (YOLOv8n, 37 FPS on M-series, 人物跟随 demo)
+- [x] 超声波/RGB灯/点阵屏/风扇 MCP 工具
+- [x] OpenClaw 技能更新 (SKILL.md v0.8.0, 21个工具全部注册)
 
 ### 已知问题
 
 - BOOT 键长按会意外触发 WiFi 重置（需要加防抖）
 - 服务器需要手动启动 (`python app.py`)
-- 摄像头拍照端到端流程尚未完整测试（固件已更新，服务器需重启加载最新配置）
+- **摄像头拍照/视频画质差** — GC2145 在 QVGA (320x240) 分辨率下画面模糊，颜色偏差大。UXGA 拍照模式切换后画质有改善但仍有偏色问题。需要进一步调优 sensor 寄存器参数（曝光、白平衡、对比度等）
+- MJPEG 流和 LCD 预览共用摄像头帧缓冲，同时运行时会争抢导致帧率下降
 
 ---
 
@@ -215,8 +242,9 @@ WhatsApp/Telegram 用户: "MOSS，把音量调到50"
 ### 第一阶段：OpenClaw 集成（当前）
 
 - [x] **OpenClaw 本地部署** - Gateway 运行在 port 18789, GLM-5 agent
-- [ ] **HTTP 工具代理** - xiaozhi-server 添加 /moss/tools/call 端点
-- [ ] **MOSS 技能注册** - SKILL.md 封装所有 ESP32 能力到 OpenClaw
+- [x] **HTTP 工具代理** - xiaozhi-server 添加 /moss/tools/call 端点
+- [x] **MOSS 技能注册** - SKILL.md 封装所有 ESP32 能力到 OpenClaw
+- [x] **Robot Tool Server** - FastAPI RESTful Tool API (移动/视觉/状态)
 - [ ] **LLM 切换到 OpenClaw** - xiaozhi-server 通过 OpenClaw API 做推理
 - [ ] **端到端验证** - 语音→OpenClaw→工具调用→TTS 全流程
 
@@ -231,17 +259,27 @@ WhatsApp/Telegram 用户: "MOSS，把音量调到50"
 ### 第三阶段：视觉与交互
 
 - [ ] **端到端拍照测试** - 验证完整的拍照→上传→VLLM分析→回复流程
+- [ ] **摄像头画质调优** - 改善 GC2145 的曝光、白平衡和清晰度
 - [ ] **主动拍照** - OpenClaw Agent 主动调用摄像头获取环境上下文
 - [ ] **显示动画** - 空闲/思考/说话时的 LCD 动画效果
 
 ### 第四阶段：多通道与运动控制
 
 - [ ] **WhatsApp 控制** - 通过 OpenClaw WhatsApp 通道控制机器人
-- [ ] **电机/舵机控制** - 添加 MCP 工具控制运动
-- [ ] **语音控制运动** - "向前走"、"转左" → 直接电机指令
+- [x] ~~**电机/舵机控制**~~ - CyberBrick 叉车 ESP-NOW 控制已完成
+- [x] ~~**语音控制运动**~~ - "向前走"、"转左" → MCP 工具已完成
+- [ ] **端到端运动验证** - 语音指令→运动控制实际测试
 - [ ] **LLM 导航** - 复杂指令如"去桌子那边" → Agent 规划运动序列
 
-### 第五阶段：智能化与个性化
+### 第五阶段：实时视觉与感知
+
+- [x] **MJPEG 视频流** - ESP32 port 81, 按需启动
+- [x] **LCD 实时预览** - ~10 FPS, 语音控制开关
+- [x] **本地视觉 Agent** - YOLOv8n + 人物跟随 demo (vision_agent/)
+- [ ] **摄像头画质调优** - 改善 GC2145 拍照/视频的清晰度和色彩还原
+- [ ] **端到端跟随测试** - 视觉 Agent + CyberBrick 实际人物跟随
+
+### 第六阶段：智能化与个性化
 
 - [ ] **长期记忆** - 利用 OpenClaw 记忆系统持久化对话上下文
 - [ ] **意图识别** - 区分指令和闲聊
@@ -264,9 +302,17 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 ### 启动服务器
 
 ```bash
-cd xiaozhi-esp32-server/main/xiaozhi-server
-source venv/bin/activate
-python app.py
+cd xiaozhi-esp32-server && ./start.sh
+```
+
+### 运行视觉 Agent
+
+```bash
+cd vision_agent && ./start.sh
+# 或自定义参数:
+# ./start.sh --no-robot          # 仅检测，不控制机器人
+# ./start.sh --conf 0.7          # 提高检测置信度阈值
+# MOSS_STREAM_URL=http://... ./start.sh  # 自定义视频流地址
 ```
 
 ### 关键配置文件

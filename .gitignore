@@ -3,7 +3,7 @@ firmware/build/
 firmware/managed_components/
 firmware/sdkconfig.old
 
-# sdkconfig contains WiFi credentials
+# sdkconfig contains WiFi credentials and server addresses
 firmware/sdkconfig
 
 # Python
@@ -13,10 +13,11 @@ __pycache__/
 .venv/
 venv/
 
-# Server models (large files)
+# Server data (user configs with API keys, uploaded photos, plugins)
 xiaozhi-esp32-server/main/xiaozhi-server/models/
 xiaozhi-esp32-server/main/xiaozhi-server/venv/
 xiaozhi-esp32-server/main/xiaozhi-server/data/
+xiaozhi-esp32-server/main/photos/
 xiaozhi-esp32-server/main/xiaozhi-server/plugins/
 
 # Node.js
@@ -32,6 +33,25 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# Secrets
+# Secrets & credentials
 *.key
 *.pem
+.env
+.env.*
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Large binary files (download on demand)
+*.pt
+*.onnx
+*.pth
+
+# Stray build artifacts / bundled JS
+main.js
+
+# Hardware vendor docs / tutorials (large, non-project)
+ESP32-S3开发板(V1.0版)/
+
+# CyberBrick config exports (personal controller layout)
+叉车*.json

@@ -59,7 +59,19 @@ class LLMProvider(LLMProviderBase):
         model_key_msg = check_model_key("LLM", self.api_key)
         if model_key_msg:
             logger.bind(tag=TAG).error(model_key_msg)
-        self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=custom_timeout)
+
+        # Support for OpenClaw fixed session key
+        default_headers = {}
+        openclaw_session_key = config.get("openclaw_session_key")
+        if openclaw_session_key:
+            default_headers["x-openclaw-session-key"] = openclaw_session_key
+
+        self.client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=custom_timeout,
+            default_headers=default_headers if default_headers else None,
+        )
 
     @staticmethod
     def normalize_dialogue(dialogue):

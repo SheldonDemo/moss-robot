@@ -1,5 +1,7 @@
 import json
 import copy
+import os
+import time
 from aiohttp import web
 from config.logger import setup_logging
 from core.api.base_handler import BaseHandler
@@ -15,6 +17,8 @@ TAG = __name__
 
 # 设置最大文件大小为5MB
 MAX_FILE_SIZE = 5 * 1024 * 1024
+
+PHOTOS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "photos")
 
 
 class VisionHandler(BaseHandler):
@@ -100,6 +104,21 @@ class VisionHandler(BaseHandler):
             # 将图片转换为base64编码
             image_base64 = base64.b64encode(image_data).decode("utf-8")
 
+            # Save photo to disk for debugging/review
+            try:
+                os.makedirs(PHOTOS_DIR, exist_ok=True)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                photo_path = os.path.join(PHOTOS_DIR, f"photo_{timestamp}.jpg")
+                with open(photo_path, "wb") as f:
+                    f.write(image_data)
+                # Also save as "latest.jpg" for easy access
+                latest_path = os.path.join(PHOTOS_DIR, "latest.jpg")
+                with open(latest_path, "wb") as f:
+                    f.write(image_data)
+                self.logger.bind(tag=TAG).info(f"Photo saved: {photo_path} ({len(image_data)} bytes)")
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"Failed to save photo: {e}")
+
             # 如果开启了智控台，则从智控台获取模型配置
             current_config = copy.deepcopy(self.config)
             read_config_from_api = current_config.get("read_config_from_api", False)
@@ -180,3 +199,30 @@ class VisionHandler(BaseHandler):
         finally:
             self._add_cors_headers(response)
             return response
+
+    async def handle_photo_latest(self, request):
+        """返回最新保存的照片"""
+        latest_path = os.path.join(PHOTOS_DIR, "latest.jpg")
+        if not os.path.exists(latest_path):
+            return web.Response(
+                text=json.dumps({"error": "No photo available"}),
+                content_type="application/json",
+                status=404,
+            )
+        return web.FileResponse(latest_path)
+
+    async def handle_photo_list(self, request):
+        """列出所有已保存的照片"""
+        if not os.path.exists(PHOTOS_DIR):
+            return web.Response(
+                text=json.dumps({"photos": []}),
+                content_type="application/json",
+            )
+        photos = sorted(
+            [f for f in os.listdir(PHOTOS_DIR) if f.startswith("photo_") and f.endswith(".jpg")],
+            reverse=True,
+        )
+        return web.Response(
+            text=json.dumps({"photos": photos, "count": len(photos)}),
+            content_type="application/json",
+        )

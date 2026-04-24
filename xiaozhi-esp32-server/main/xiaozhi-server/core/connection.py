@@ -976,11 +976,15 @@ class ConnectionHandler:
             # 使用带记忆的对话
             memory_str = None
             # 仅当query非空（代表用户询问）时查询记忆
-            if self.memory is not None and query:
+            if self.memory is not None and query and not use_openclaw:
                 future = asyncio.run_coroutine_threadsafe(
                     self.memory.query_memory(query), self.loop
                 )
-                memory_str = future.result()
+                try:
+                    memory_str = future.result(timeout=3)
+                except Exception:
+                    self.logger.bind(tag=TAG).warning("记忆查询超时，跳过")
+                    memory_str = None
 
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
@@ -1474,35 +1478,8 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).error(f"Chat and close error: {str(e)}")
 
     async def _check_timeout(self):
-        """检查连接超时"""
-        try:
-            while not self.stop_event.is_set():
-                last_activity_time = self.last_activity_time
-                if self.need_bind:
-                    last_activity_time = self.first_activity_time
-
-                # 检查是否超时（只有在时间戳已初始化的情况下）
-                if last_activity_time > 0.0:
-                    current_time = time.time() * 1000
-                    if current_time - last_activity_time > self.timeout_seconds * 1000:
-                        if not self.stop_event.is_set():
-                            self.logger.bind(tag=TAG).info("连接超时，准备关闭")
-                            # 设置停止事件，防止重复处理
-                            self.stop_event.set()
-                            # 使用 try-except 包装关闭操作，确保不会因为异常而阻塞
-                            try:
-                                await self.close(self.websocket)
-                            except Exception as close_error:
-                                self.logger.bind(tag=TAG).error(
-                                    f"超时关闭连接时出错: {close_error}"
-                                )
-                        break
-                # 每10秒检查一次，避免过于频繁
-                await asyncio.sleep(10)
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"超时检查任务出错: {e}")
-        finally:
-            self.logger.bind(tag=TAG).info("超时检查任务已退出")
+        """持续监听模式：不进行超时关闭，设备一直待命直到用户说出退出关键词"""
+        pass
 
     def _merge_tool_calls(self, tool_calls_list, tools_call):
         """合并工具调用列表

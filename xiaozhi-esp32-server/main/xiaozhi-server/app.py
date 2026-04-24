@@ -93,6 +93,16 @@ async def main():
         get_local_ip(),
         port,
     )
+    logger.bind(tag=TAG).info(
+        "Robot Tool API\thttp://{}:{}/robot/health",
+        get_local_ip(),
+        port,
+    )
+    logger.bind(tag=TAG).info(
+        "MCP Server\t\thttp://{}:{}/mcp",
+        get_local_ip(),
+        port,
+    )
     mcp_endpoint = config.get("mcp_endpoint", None)
     if mcp_endpoint is not None and "你" not in mcp_endpoint:
         # 校验MCP接入点格式
